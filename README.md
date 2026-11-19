@@ -13,6 +13,38 @@ Abliteration is a post-training weight edit. It projects a selected component ou
 3. **Project out a subspace.** A single direction produced little change in this experiment. The selected edit used multiple directions and reduced overlap with language and style features before projecting the subspace out of the weights.
 4. **Quantize and compare.** The resulting model was exported as Q4_K_M. An unedited Q4 checkpoint made with the same quantization recipe served as a baseline for measuring the additional drift from the edit.
 
+## Technical details
+
+### Why the activation capture mattered
+
+SenseNova Loop has 32 physical decoder blocks and executes 24 of them twice, for 56 block executions per forward pass. A physical block index identifies a set of weights. An execution index identifies one use of those weights, with its own incoming activations. Mixing those indices can make a difference between two passes look like a difference between prompt groups. [Base architecture](https://huggingface.co/sensenova/SenseNova-Loop-9B#model-architecture)
+
+The mHC router carries two residual streams through the loop. In the runtime used for the experiment, a capture hook initially treated a strided tensor view as a contiguous buffer. Reading the view that way associated some values with the wrong coordinates. The corrected analysis accounted for the tensor strides and kept the two streams and the two visits distinct when comparing activations. This matters because a projection is only meaningful in the coordinate system of the weights it edits.
+
+### Why use a subspace
+
+A single direction can correlate with refusals without being sufficient to change how the model responds. The first one-direction intervention had little effect in this checkpoint. The experiment therefore revisited the activations after intervening and looked for additional directions outside the basis already removed. Orthogonalizing those directions keeps redundant directions from counting as independent changes. The retained basis had eight directions.
+
+The candidate subspace also overlapped with patterns found in ordinary answers and with differences between French and English activations. The project reduced that overlap before editing the weights. Early edits produced spelling errors and repetitive reasoning in French, which is why the evaluation tracked drift separately for each language.
+
+### What the projection changes
+
+Take a residual-writing matrix $W$ with shape $d_{model} \times d_{in}$ and an orthonormal basis $Q$ with shape $d_{model} \times k$. The columns of $Q$ live in output space. For an input $x$, $Q^\top Wx$ gives the coordinates of the write along the selected directions. Multiplying by $Q$ maps those coordinates back into the residual stream. The edit subtracts that contribution for every possible $x$.
+
+$
+W_{edited} = (I - QQ^\top)W
+\qquad\Longrightarrow\qquad
+Q^\top W_{edited} = 0.
+$
+
+The identity applies to each edited matrix before quantization and provides a direct check on the projection. In SenseNova Loop, the residual writes of interest include the output projections of attention, state-space layers, and feed-forward layers. A weight edit to a reused matrix takes effect on both visits. The identity describes those matrix outputs. Other paths through the network can still contribute to the full residual state, and quantization can introduce a small component along the projected directions again.
+
+### How to read the evaluation
+
+The matched unedited Q4 baseline controls for the effect of lowering weight precision when measuring drift. At the same token history, KL divergence is sensitive to changes across the entire distribution of next-token probabilities, including when both checkpoints choose the same token. The factual set measures whether the final answers are correct, which explains why the table can show the same factual score alongside measurable distribution drift.
+
+On a separate 45-prompt refusal evaluation, an automated judge marked 27 responses from the edited Q4 model as fulfilling the request. The project logged zero explicit refusals on that run. Those counts measure different outcomes: a response can avoid an explicit refusal while stalling, answering only part of the request, or interpreting it differently. Both counts are specific to that sample and scoring procedure.
+
 ## Internal evaluation
 
 | Metric | Original Q8_0 | Edited Q4_K_M |
